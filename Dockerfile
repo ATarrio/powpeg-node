@@ -13,12 +13,12 @@ USER rsk
 WORKDIR /home/rsk
 COPY --chown=rsk:rsk . ./
 
-RUN gpg --keyserver https://secchannel.rsk.co/SUPPORT.asc --recv-keys 1DC9157991323D23FD37BAA7A6DBEAC640C5A14B && \
-    gpg --verify --output SHA256SUMS SHA256SUMS.asc && \
-    sha256sum --check SHA256SUMS && \
-    ./configure.sh && \
-    ./gradlew --no-daemon clean build -x test && \
-    cp "build/libs/federate-node-$RSK_VERSION-all.jar" rsk.jar
+RUN gpg --keyserver https://secchannel.rsk.co/SUPPORT.asc --recv-keys 1DC9157991323D23FD37BAA7A6DBEAC640C5A14B 
+RUN gpg --verify --output SHA256SUMS SHA256SUMS.asc 
+RUN sha256sum --check SHA256SUMS 
+RUN ./configure.sh  
+RUN ./gradlew --no-daemon clean build -x test 
+RUN cp "build/libs/federate-node-$RSK_VERSION-all.jar" rsk.jar
 
 FROM openjdk:8-jre-slim-buster
 LABEL org.opencontainers.image.authors="ops@rootstocklabs.com"
