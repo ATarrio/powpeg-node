@@ -5,8 +5,8 @@ on:
       - '*'
 
 env:
-  GHCR_REPO: "ghcr.io/rsksmart/powpeg-node"
-  DOCKERHUB_REPO: "rsksmart/powpeg-node"
+  GHCR_REPO: "ghcr.io/atarrio/powpeg-node"
+  DOCKERHUB_REPO: "atarrio/powpeg-node"
 
 jobs:
   build:
@@ -16,11 +16,12 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
       - name: Set version
         id: vars
-        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/}
+        run: |
+          echo "name=tag::${GITHUB_REF#refs/*/}" >> "${GITHUB_OUTPUT}"
 
       - name: Docker meta
         id: meta
@@ -40,14 +41,6 @@ jobs:
         with:
           driver: docker
 
-      - name: Build Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: RSK_RELEASE=${{ steps.vars.outputs.tag }}
-
       - name: DockerHub login
         uses: docker/login-action@v3
         with:
@@ -61,7 +54,12 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push Images
-        run: |
-          docker push ${{ env.DOCKERHUB_REPO }}
-          docker push ${{ env.GHCR_REPO }}
+      - name: Build Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: RSK_RELEASE=${{ steps.vars.outputs.tag }}
+          push: true
+
