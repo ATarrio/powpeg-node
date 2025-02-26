@@ -8,8 +8,8 @@ on:
 permissions: read-all
 
 env:
-  GHCR_REPO: "ghcr.io/rsksmart/powpeg-node"
-  DOCKERHUB_REPO: "rsksmart/powpeg-node"
+  GHCR_REPO: "ghcr.io/atarrio/powpeg-node"
+  DOCKERHUB_REPO: "atarrio/powpeg-node"
 
 jobs:
   build:
