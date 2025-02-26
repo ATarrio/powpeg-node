@@ -30,12 +30,25 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.commons.lang3.reflect.FieldUtils;
+import org.ethereum.config.blockchain.upgrades.ActivationConfig;
 import org.ethereum.core.Block;
 import org.ethereum.core.BlockHeader;
+import org.ethereum.core.BlockHeaderBuilder;
+import org.ethereum.core.Transaction;
 
 public final class TestUtils {
 
     private TestUtils() {
+    }
+
+    public static Block createBlock(int blockNumber, List<Transaction> rskTxs) {
+
+        int parentBlockNumber = blockNumber > 0 ? blockNumber - 1 : 0;
+        BlockHeader blockHeader = new BlockHeaderBuilder(mock(ActivationConfig.class))
+            .setNumber(blockNumber)
+            .setParentHashFromKeccak256(TestUtils.createHash(parentBlockNumber))
+            .build();
+        return new Block(blockHeader, rskTxs, Collections.emptyList(), true, true);
     }
 
     public static Keccak256 createHash(int nHash) {
@@ -52,7 +65,6 @@ public final class TestUtils {
         when(block.getUncleList()).thenReturn(Collections.emptyList());
         BlockHeader blockHeader = mock(BlockHeader.class);
         when(blockHeader.getHash()).thenReturn(hash);
-        when(blockHeader.getFullEncoded()).thenReturn(hash.getBytes());
         when(block.getHeader()).thenReturn(blockHeader);
 
         return block;
@@ -64,8 +76,7 @@ public final class TestUtils {
         when(block.getNumber()).thenReturn(number);
         when(block.getParentHash()).thenReturn(parentHash);
         BlockHeader blockHeader = mock(BlockHeader.class);
-        when(blockHeader.getEncoded(true, false)).thenReturn(hash.getBytes());
-        when(blockHeader.getFullEncoded()).thenReturn(hash.getBytes());
+        when(blockHeader.getEncoded(true, false, true)).thenReturn(hash.getBytes());
         when(block.getHeader()).thenReturn(blockHeader);
 
         return block;
@@ -76,7 +87,6 @@ public final class TestUtils {
         when(block.getHash()).thenReturn(hash);
         when(block.getNumber()).thenReturn(number);
         BlockHeader blockHeader = mock(BlockHeader.class);
-        when(blockHeader.getFullEncoded()).thenReturn(hash.getBytes());
         when(blockHeader.getHash()).thenReturn(hash);
         when(block.getHeader()).thenReturn(blockHeader);
         when(block.getDifficulty()).thenReturn(new BlockDifficulty(BigInteger.valueOf(difficultyValue)));

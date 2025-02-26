@@ -3,49 +3,33 @@ package co.rsk.federate;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import co.rsk.bitcoinj.core.BtcTransaction;
-import co.rsk.peg.constants.BridgeConstants;
 import co.rsk.federate.adapter.ThinConverter;
-import co.rsk.federate.bitcoin.BitcoinWrapper;
-import co.rsk.federate.bitcoin.BlockListener;
-import co.rsk.federate.bitcoin.TransactionListener;
-import co.rsk.federate.io.BtcToRskClientFileData;
-import co.rsk.federate.io.BtcToRskClientFileReadResult;
-import co.rsk.federate.io.BtcToRskClientFileStorage;
+import co.rsk.federate.bitcoin.*;
+import co.rsk.federate.config.PowpegNodeSystemProperties;
+import co.rsk.federate.io.*;
 import co.rsk.federate.timing.TurnScheduler;
 import co.rsk.net.NodeBlockProcessor;
 import co.rsk.panic.PanicProcessor;
 import co.rsk.peg.BridgeUtils;
 import co.rsk.peg.PegUtilsLegacy;
-import co.rsk.peg.federation.Federation;
-import co.rsk.peg.federation.FederationMember;
 import co.rsk.peg.PeginInformation;
+import co.rsk.peg.bitcoin.BitcoinUtils;
 import co.rsk.peg.btcLockSender.BtcLockSender.TxSenderAddressType;
 import co.rsk.peg.btcLockSender.BtcLockSenderProvider;
+import co.rsk.peg.constants.BridgeConstants;
+import co.rsk.peg.federation.Federation;
+import co.rsk.peg.federation.FederationMember;
 import co.rsk.peg.pegininstructions.PeginInstructionsException;
 import co.rsk.peg.pegininstructions.PeginInstructionsProvider;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.time.Clock;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.IntStream;
 import javax.annotation.PreDestroy;
-import org.bitcoinj.core.Block;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.PartialMerkleTree;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.StoredBlock;
-import org.bitcoinj.core.Transaction;
-import org.bitcoinj.core.Utils;
+import org.bitcoinj.core.*;
 import org.bitcoinj.store.BlockStoreException;
 import org.ethereum.config.blockchain.upgrades.ActivationConfig;
 import org.ethereum.config.blockchain.upgrades.ConsensusRule;
@@ -77,12 +61,15 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
     ScheduledExecutorService updateBridgeTimer; // Timer that updates the bridge periodically
     private int amountOfHeadersToSend; // Set amount of headers to inform in a single call
     private BtcToRskClientFileData fileData = new BtcToRskClientFileData();
+    private boolean shouldUpdateBridgeBtcBlockchain;
+    private boolean shouldUpdateBridgeBtcCoinbaseTransactions;
+    private boolean shouldUpdateBridgeBtcTransactions;
+    private boolean shouldUpdateCollections;
 
     public BtcToRskClient() {}
 
     /// This constructor should only be used by tests.
     protected BtcToRskClient(
-        ActivationConfig activationConfig,
         BitcoinWrapper bitcoinWrapper,
         FederatorSupport federatorSupport,
         BridgeConstants bridgeConstants,
@@ -90,10 +77,8 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
         BtcLockSenderProvider btcLockSenderProvider,
         PeginInstructionsProvider peginInstructionsProvider,
         Federation federation,
-        boolean isUpdateBridgeTimerEnabled,
-        int amountOfHeadersToSend
+        PowpegNodeSystemProperties config
     ) throws Exception {
-        this.activationConfig = activationConfig;
         this.bitcoinWrapper = bitcoinWrapper;
         this.federatorSupport = federatorSupport;
         this.bridgeConstants = bridgeConstants;
@@ -102,44 +87,40 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
         this.btcLockSenderProvider = btcLockSenderProvider;
         this.peginInstructionsProvider = peginInstructionsProvider;
         this.federation = federation;
-        this.isUpdateBridgeTimerEnabled = isUpdateBridgeTimerEnabled;
-        this.amountOfHeadersToSend = amountOfHeadersToSend;
+        setConfigVariables(config);
     }
 
     public synchronized void setup(
-        ActivationConfig activationConfig,
         BitcoinWrapper bitcoinWrapper,
         BridgeConstants bridgeConstants,
         BtcToRskClientFileStorage btcToRskClientFileStorage,
         BtcLockSenderProvider btcLockSenderProvider,
         PeginInstructionsProvider peginInstructionsProvider,
-        boolean isUpdateBridgeTimerEnabled,
-        int amountOfHeadersToSend
+        PowpegNodeSystemProperties config
     ) throws Exception {
-        this.activationConfig = activationConfig;
         this.bridgeConstants = bridgeConstants;
         this.btcToRskClientFileStorage = btcToRskClientFileStorage;
         this.restoreFileData();
         this.bitcoinWrapper = bitcoinWrapper;
         this.btcLockSenderProvider = btcLockSenderProvider;
         this.peginInstructionsProvider = peginInstructionsProvider;
-        this.isUpdateBridgeTimerEnabled = isUpdateBridgeTimerEnabled;
         bitcoinWrapper.addBlockListener(this);
-        this.isUpdateBridgeTimerEnabled = isUpdateBridgeTimerEnabled;
-        this.amountOfHeadersToSend = amountOfHeadersToSend;
+        setConfigVariables(config);
  }
 
     public void start(Federation federation) {
         logger.info("[start] Starting for Federation {}", federation.getAddress());
         this.federation = federation;
+
         FederationMember federator = federatorSupport.getFederationMember();
         boolean isMember = federation.isMember(federator);
-
         if (!isMember) {
-            logger.info("[start] member {} is no part of the federation {} ",
+            String message = String.format(
+                "Member %s is no part of the federation %s",
                 federator.getBtcPublicKey(),
                 federation.getAddress());
-            return;
+            logger.error("[start] {}", message);
+            throw new IllegalStateException(message);
         }
 
         logger.info("[start] {} is member of the federation {}",
@@ -147,9 +128,9 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
         logger.info("[start] Watching federation {} since I belong to it",
             federation.getAddress());
         bitcoinWrapper.addFederationListener(federation, this);
+
         Optional<Integer> federatorIndex = federation.getBtcPublicKeyIndex(
-            federatorSupport.getFederationMember().getBtcPublicKey()
-        );
+            federatorSupport.getFederationMember().getBtcPublicKey());
         if (!federatorIndex.isPresent()) {
             String message = String.format(
                 "Federator %s is a member of the federation %s but could not find the btcPublicKeyIndex",
@@ -159,22 +140,21 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
             logger.error("[start] {}", message);
             throw new IllegalStateException(message);
         }
-        TurnScheduler scheduler = new TurnScheduler(
-                bridgeConstants.getUpdateBridgeExecutionPeriod(),
-                federation.getSize()
-        );
-        long now = Clock.systemUTC().instant().toEpochMilli();
 
         if (isUpdateBridgeTimerEnabled) {
-            updateBridgeTimer = Executors.newSingleThreadScheduledExecutor();
+            long now = Clock.systemUTC().instant().toEpochMilli();
+            TurnScheduler scheduler = new TurnScheduler(
+              bridgeConstants.getUpdateBridgeExecutionPeriod(),
+              federation.getSize());
+
+            this.updateBridgeTimer = Executors.newSingleThreadScheduledExecutor();
+
             updateBridgeTimer.scheduleAtFixedRate(
                 this::updateBridge,
                 scheduler.getDelay(now, federatorIndex.get()),
                 scheduler.getInterval(),
-                TimeUnit.MILLISECONDS
-            );
-        }
-        else {
+                TimeUnit.MILLISECONDS);
+        } else {
             logger.info("[start] updateBridgeTimer is disabled");
         }
     }
@@ -182,11 +162,11 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
     public void stop() {
         logger.info("Stopping");
 
-        federation = null;
+        this.federation = null;
 
         if (updateBridgeTimer != null) {
             updateBridgeTimer.shutdown();
-            updateBridgeTimer = null;
+            this.updateBridgeTimer = null;
         }
     }
 
@@ -198,53 +178,63 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
         if (federation == null) {
             logger.warn("[updateBridge] updateBridge skipped because no Federation is associated to this BtcToRskClient");
         }
+
         if (nodeBlockProcessor.hasBetterBlockToSync()) {
             logger.warn("[updateBridge] updateBridge skipped because the node is syncing blocks");
             return;
         }
+
         logger.debug("[updateBridge] Updating bridge");
 
-        // Call receiveHeaders
-        try {
-            int numberOfBlocksSent = updateBridgeBtcBlockchain();
-            logger.debug("[updateBridge] Updated bridge blockchain with {} blocks", numberOfBlocksSent);
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
-            panicProcessor.panic("btclock", e.getMessage());
+        if (shouldUpdateBridgeBtcBlockchain) {
+            // Call receiveHeaders
+            try {
+                int numberOfBlocksSent = updateBridgeBtcBlockchain();
+                logger.debug("[updateBridge] Updated bridge blockchain with {} blocks", numberOfBlocksSent);
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                panicProcessor.panic("btclock", e.getMessage());
+            }
         }
 
-        // Call registerBtcCoinbaseTransaction
-        try {
-            logger.debug("[updateBridge] Updating transactions and sending update");
-            updateBridgeBtcCoinbaseTransactions();
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
-            panicProcessor.panic("btclock", e.getMessage());
+        if (shouldUpdateBridgeBtcCoinbaseTransactions) {
+            // Call registerBtcCoinbaseTransaction
+            try {
+                logger.debug("[updateBridge] Updating transactions and sending update");
+                updateBridgeBtcCoinbaseTransactions();
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                panicProcessor.panic("btclock", e.getMessage());
+            }
         }
 
-        // Call registerBtcTransaction
-        try {
-            logger.debug("[updateBridge] Updating transactions and sending update");
-            updateBridgeBtcTransactions();
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
-            panicProcessor.panic("btclock", e.getMessage());
+        if (shouldUpdateBridgeBtcTransactions) {
+            // Call registerBtcTransaction
+            try {
+                logger.debug("[updateBridge] Updating transactions and sending update");
+                updateBridgeBtcTransactions();
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                panicProcessor.panic("btclock", e.getMessage());
+            }
         }
 
-        // Call updateCollections
-        try {
-            logger.debug("[updateBridge] Sending updateCollections");
-            federatorSupport.sendUpdateCollections();
-        } catch (Exception e) {
-            logger.error(e.getMessage(), e);
-            panicProcessor.panic("btclock", e.getMessage());
+        if (shouldUpdateCollections) {
+            // Call updateCollections
+            try {
+                logger.debug("[updateBridge] Sending updateCollections");
+                federatorSupport.sendUpdateCollections();
+            } catch (Exception e) {
+                logger.error(e.getMessage(), e);
+                panicProcessor.panic("btclock", e.getMessage());
+            }
         }
     }
 
     @Override
     public void onBlock(Block block) {
         synchronized (this) {
-            logger.debug("onBlock {}", block.getHash());
+            logger.debug("[onBlock] {}", block.getHash());
             PartialMerkleTree tree;
             Transaction coinbase = null;
             boolean dataToWrite = false;
@@ -253,6 +243,7 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
 
                 if (tx.isCoinBase()) {
                     // safe keep the coinbase and move on
+                    logger.debug("[onBlock] Transaction {} is the coinbase", tx.getTxId());
                     coinbase = tx;
                     continue;
                 }
@@ -261,11 +252,12 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
                     // this tx is not important move on
                     continue;
                 }
+                logger.debug("[onBlock] Found transaction {} that needs to be registered in the Bridge", tx.getTxId());
 
                 List<Proof> proofs = fileData.getTransactionProofs().get(tx.getWTxId());
                 boolean blockInProofs = proofs.stream().anyMatch(p -> p.getBlockHash().equals(block.getHash()));
                 if (blockInProofs) {
-                    logger.info("Proof for tx {} in block {} already stored", tx, block.getHash());
+                    logger.info("[onBlock] Proof for tx {} in block {} already stored", tx.getTxId(), block.getHash());
                     continue;
                 }
 
@@ -273,45 +265,38 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
                 tree = generatePMT(block, tx, tx.hasWitnesses());
                 // If the transaction has a witness, then we need to store the coinbase information to inform it
                 if (tx.hasWitnesses() && !coinbaseRegistered) {
+                    logger.debug("[onBlock] Transaction {} has witness, will need to store the coinbase information to inform it", tx.getTxId());
                     // We don't want to generate the PMT with the wtxid for the coinbase
                     // as it doesn't have a corresponding hash in the witness root
                     PartialMerkleTree coinbasePmt = generatePMT(block, coinbase, false);
                     try {
                         Sha256Hash witnessMerkleRoot = tree.getTxnHashAndMerkleRoot(new ArrayList<>());
                         CoinbaseInformation coinbaseInformation = new CoinbaseInformation(
-                                coinbase,
-                                witnessMerkleRoot,
-                                block.getHash(),
-                                coinbasePmt
+                            coinbase,
+                            witnessMerkleRoot,
+                            block.getHash(),
+                            coinbasePmt
                         );
-                        // Validate information
-                        byte[] witnessReservedValue = coinbaseInformation.getCoinbaseWitnessReservedValue();
-                        if (witnessReservedValue == null) {
-                            logger.error("block {} with lock segwit tx {} has coinbase with no witness reserved value. Aborting block processing.", block.getHash(), tx.getWTxId());
-                            // Can't register this transaction, it would be rejected by the Bridge
-                            return;
-                        }
-                        Sha256Hash calculatedWitnessCommitment = Sha256Hash.twiceOf(witnessMerkleRoot.getReversedBytes(), witnessReservedValue);
-                        Sha256Hash witnessCommitment = coinbase.findWitnessCommitment();
-                        if (!witnessCommitment.equals(calculatedWitnessCommitment)) {
-                            logger.error("block {} with lock segwit tx {} generated an invalid witness merkle root", tx.getWTxId(), block.getHash());
-                            // Can't register this transaction, it would be rejected by the Bridge
-                            return;
-                        }
+                        validateCoinbaseInformation(coinbaseInformation);
+
                         // store the coinbase
-                        fileData.getCoinbaseInformationMap().put(coinbaseInformation.getBlockHash(), coinbaseInformation);
+                        fileData.getCoinbaseInformationMap().put(
+                            coinbaseInformation.getBlockHash(),
+                            coinbaseInformation
+                        );
+                        logger.debug("[onBlock] Coinbase information for transaction {} successully stored", tx.getTxId());
 
                         // Register the coinbase just once per block
                         coinbaseRegistered = true;
                     } catch (Exception e) {
-                        logger.error(e.getMessage(), e);
+                        logger.error("[onBlock] {}", e.getMessage());
                         // Without a coinbase related to this transaction the Bridge would reject the transaction
                         return;
                     }
                 }
 
                 proofs.add(new Proof(block.getHash(), tree));
-                logger.info("New proof for tx {} in block {}", tx, block.getHash());
+                logger.info("[onBlock] New proof for tx {} in block {}", tx.getTxId(), block.getHash());
                 dataToWrite = true;
             }
 
@@ -321,17 +306,58 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
 
             try {
                 this.btcToRskClientFileStorage.write(fileData);
-                logger.info("Stored proofs for block {}", block.getHash());
+                logger.info("[onBlock] Stored proofs for block {}", block.getHash());
             } catch (IOException e) {
-                logger.error(e.getMessage(), e);
+                logger.error("[onBlock] {}", e.getMessage());
                 panicProcessor.panic("btclock", e.getMessage());
             }
         }
     }
 
+    private void validateCoinbaseInformation(CoinbaseInformation coinbaseInformation) {
+        Sha256Hash witnessMerkleRoot = coinbaseInformation.getWitnessRoot();
+        byte[] witnessReservedValue = coinbaseInformation.getCoinbaseWitnessReservedValue();
+        BtcTransaction coinbaseTransaction = ThinConverter.toThinInstance(
+            bridgeConstants.getBtcParams(),
+            coinbaseInformation.getCoinbaseTransaction()
+        );
+
+        if (witnessReservedValue == null) {
+            String message = String.format(
+                "Block %s with segwit peg-in tx %s has coinbase with no witness reserved value. Aborting block processing.",
+                coinbaseInformation.getBlockHash(),
+                coinbaseTransaction.getHash()
+            );
+            logger.error("[validateCoinbaseInformation] {}", message);
+            throw new IllegalArgumentException(message);
+        }
+
+        Optional<co.rsk.bitcoinj.core.Sha256Hash> expectedWitnessCommitment = BitcoinUtils.findWitnessCommitment(coinbaseTransaction, federatorSupport.getConfigForBestBlock());
+        co.rsk.bitcoinj.core.Sha256Hash calculatedWitnessCommitment = co.rsk.bitcoinj.core.Sha256Hash.twiceOf(
+            witnessMerkleRoot.getReversedBytes(),
+            witnessReservedValue
+        );
+
+        if (expectedWitnessCommitment.isEmpty() || !expectedWitnessCommitment.get().equals(calculatedWitnessCommitment)) {
+            String message = String.format(
+                "Block %s with segwit peg-in tx %s generated an invalid witness commitment",
+                coinbaseInformation.getBlockHash(),
+                coinbaseTransaction.getHash()
+            );
+            logger.error("[validateCoinbaseInformation] {}", message);
+            throw new IllegalArgumentException(message);
+        }
+
+        logger.debug(
+            "[validateCoinbaseInformation] Block {} with segwit peg-in tx {} has a valid witness merkle root",
+            coinbaseInformation.getBlockHash(),
+            coinbaseTransaction.getHash()
+        );
+    }
+
     @Override
     public void onTransaction(Transaction tx) {
-        logger.debug("onTransaction {}", tx.getWTxId());
+        logger.debug("[onTransaction] {} (wtxid:{})", tx.getTxId(), tx.getWTxId());
         synchronized (this) {
             this.fileData.getTransactionProofs().put(tx.getWTxId(), new ArrayList<>());
             try {
@@ -420,12 +446,17 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
             return;
         }
         boolean modified = false;
-        for (Block informedBlock:informedBlocks) {
+        for (Block informedBlock : informedBlocks) {
             if (coinbaseInformationMap.containsKey(informedBlock.getHash())) {
                 CoinbaseInformation coinbaseInformation = coinbaseInformationMap.get(informedBlock.getHash());
                 coinbaseInformation.setReadyToInform(true);
                 this.fileData.getCoinbaseInformationMap().put(informedBlock.getHash(), coinbaseInformation);
                 modified = true;
+                logger.debug(
+                    "[markCoinbasesAsReadyToBeInformed] Marked coinbase {} for block {} as ready to be informed",
+                    coinbaseInformation.getCoinbaseTransaction().getTxId(),
+                    informedBlock.getHash()
+                );
             }
         }
         if (!modified) {
@@ -813,6 +844,17 @@ public class BtcToRskClient implements BlockListener, TransactionListener {
     @VisibleForTesting
     protected PartialMerkleTree generatePMT(Block block, Transaction transaction) {
         return generatePMT(block, transaction, transaction.hasWitnesses());
+    }
+
+    private void setConfigVariables(PowpegNodeSystemProperties config) {
+        this.activationConfig = config.getActivationConfig();
+        this.isUpdateBridgeTimerEnabled = config.isUpdateBridgeTimerEnabled();
+        this.isUpdateBridgeTimerEnabled = config.isUpdateBridgeTimerEnabled();
+        this.amountOfHeadersToSend = config.getAmountOfHeadersToSend();
+        this.shouldUpdateBridgeBtcBlockchain = config.shouldUpdateBridgeBtcBlockchain();
+        this.shouldUpdateBridgeBtcCoinbaseTransactions = config.shouldUpdateBridgeBtcCoinbaseTransactions();
+        this.shouldUpdateBridgeBtcTransactions = config.shouldUpdateBridgeBtcTransactions();
+        this.shouldUpdateCollections = config.shouldUpdateCollections();
     }
 
     public static class Factory {

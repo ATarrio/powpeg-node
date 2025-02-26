@@ -1,117 +1,84 @@
 package co.rsk.federate;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static java.util.Objects.nonNull;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 import co.rsk.bitcoinj.core.BtcECKey;
 import co.rsk.bitcoinj.core.BtcTransaction;
 import co.rsk.bitcoinj.crypto.TransactionSignature;
 import co.rsk.bitcoinj.params.RegTestParams;
 import co.rsk.bitcoinj.script.ScriptBuilder;
-import co.rsk.federate.signing.utils.TestUtils;
-import co.rsk.peg.constants.BridgeConstants;
-import co.rsk.peg.constants.BridgeRegTestConstants;
+import co.rsk.bitcoinj.script.ScriptOpCodes;
+import co.rsk.cli.CliArgs;
+import co.rsk.config.*;
 import co.rsk.federate.adapter.ThinConverter;
 import co.rsk.federate.bitcoin.BitcoinWrapper;
 import co.rsk.federate.bitcoin.BitcoinWrapperImpl;
-import co.rsk.federate.io.BtcToRskClientFileData;
-import co.rsk.federate.io.BtcToRskClientFileReadResult;
-import co.rsk.federate.io.BtcToRskClientFileStorage;
-import co.rsk.federate.mock.SimpleBitcoinWrapper;
-import co.rsk.federate.mock.SimpleBlock;
-import co.rsk.federate.mock.SimpleBtcTransaction;
-import co.rsk.federate.mock.SimpleFederatorSupport;
+import co.rsk.federate.config.PowpegNodeSystemProperties;
+import co.rsk.federate.io.*;
+import co.rsk.federate.mock.*;
+import co.rsk.federate.signing.utils.TestUtils;
 import co.rsk.net.NodeBlockProcessor;
 import co.rsk.peg.PegUtilsLegacy;
+import co.rsk.peg.btcLockSender.*;
+import co.rsk.peg.btcLockSender.BtcLockSender.TxSenderAddressType;
+import co.rsk.peg.constants.BridgeConstants;
+import co.rsk.peg.constants.BridgeRegTestConstants;
 import co.rsk.peg.federation.Federation;
 import co.rsk.peg.federation.FederationMember;
-import co.rsk.peg.btcLockSender.BtcLockSender;
-import co.rsk.peg.btcLockSender.BtcLockSender.TxSenderAddressType;
-import co.rsk.peg.btcLockSender.BtcLockSenderProvider;
-import co.rsk.peg.btcLockSender.P2shP2wpkhBtcLockSender;
 import co.rsk.peg.pegininstructions.PeginInstructionsException;
 import co.rsk.peg.pegininstructions.PeginInstructionsProvider;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Stream;
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.Block;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.PartialMerkleTree;
-import org.bitcoinj.core.Sha256Hash;
-import org.bitcoinj.core.StoredBlock;
-import org.bitcoinj.core.Transaction;
-import org.bitcoinj.core.TransactionInput;
-import org.bitcoinj.core.TransactionOutPoint;
-import org.bitcoinj.core.TransactionOutput;
-import org.bitcoinj.core.TransactionWitness;
+import org.bitcoinj.core.*;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.store.BlockStoreException;
 import org.ethereum.config.blockchain.upgrades.ActivationConfig;
+import org.ethereum.config.blockchain.upgrades.ActivationConfig.ForBlock;
 import org.ethereum.config.blockchain.upgrades.ConsensusRule;
 import org.ethereum.crypto.HashUtil;
+import org.ethereum.util.ByteUtil;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.internal.util.MockUtil;
 import org.spongycastle.util.encoders.Hex;
 
 /**
  * Created by ajlopez on 6/1/2016.
  */
 class BtcToRskClientTest {
-    private final NetworkParameters networkParameters = ThinConverter.toOriginalInstance(BridgeRegTestConstants.getInstance().getBtcParamsString());
-
+    private static final Sha256Hash WITNESS_RESERVED_VALUE = Sha256Hash.ZERO_HASH;
+    private static final int WITNESS_COMMITMENT_LENGTH = 36; // 4 bytes for header, 32 for hash
     private int nhash = 0;
     private ActivationConfig activationConfig;
     private BridgeConstants bridgeRegTestConstants;
     private Federation activeFederation;
-    private FederationMember fakeMember;
+    private FederationMember activeFederationMember;
     private BtcToRskClientBuilder btcToRskClientBuilder;
     private List<BtcECKey> federationPrivateKeys;
+    private NetworkParameters networkParameters;
+    private ForBlock activationsForBlock;
 
     @BeforeEach
     void setup() throws PeginInstructionsException, IOException {
         activationConfig = mock(ActivationConfig.class);
-        when(activationConfig.forBlock(anyLong())).thenReturn(mock(ActivationConfig.ForBlock.class));
         when(activationConfig.isActive(eq(ConsensusRule.RSKIP89), anyLong())).thenReturn(true);
+        when(activationConfig.isActive(eq(ConsensusRule.RSKIP460), anyLong())).thenReturn(true);
 
-        bridgeRegTestConstants = BridgeRegTestConstants.getInstance();
+        activationsForBlock = mock(ForBlock.class);
+        when(activationConfig.forBlock(anyLong())).thenReturn(activationsForBlock);
+        when(activationsForBlock.isActive(eq(ConsensusRule.RSKIP89))).thenReturn(true);
+        when(activationsForBlock.isActive(eq(ConsensusRule.RSKIP460))).thenReturn(true);
+
+        bridgeRegTestConstants = new BridgeRegTestConstants();
+        networkParameters = ThinConverter.toOriginalInstance(bridgeRegTestConstants.getBtcParamsString());
         federationPrivateKeys = TestUtils.getFederationPrivateKeys(9);
         activeFederation = TestUtils.createFederation(bridgeRegTestConstants.getBtcParams(), federationPrivateKeys);
-        fakeMember = FederationMember.getFederationMemberFromKey(
-            BtcECKey.fromPrivate(
-                HashUtil.keccak256("00".getBytes(StandardCharsets.UTF_8))
-            )
-        );
+        activeFederationMember = FederationMember.getFederationMemberFromKey(federationPrivateKeys.get(0));
         btcToRskClientBuilder = new BtcToRskClientBuilder();
     }
 
@@ -131,7 +98,7 @@ class BtcToRskClientTest {
         BitcoinWrapper bw = new SimpleBitcoinWrapper();
         SimpleFederatorSupport fh = new SimpleFederatorSupport();
 
-        fh.setMember(fakeMember);
+        fh.setMember(activeFederationMember);
         BtcToRskClient client = createClientWithMocks(bw, fh);
         assertDoesNotThrow(() -> client.start(activeFederation));
     }
@@ -186,6 +153,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2PKH);
         int amountOfHeadersToSend = 100;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         return btcToRskClientBuilder
             .withActivationConfig(activationConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -193,7 +163,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
     }
 
@@ -205,6 +175,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2PKH);
         int amountOfHeadersToSend = 100;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         return btcToRskClientBuilder
             .withActivationConfig(activationConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -212,7 +185,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(federation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
     }
 
@@ -474,10 +447,8 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(true, witnessRoot, Sha256Hash.ZERO_HASH.getBytes());
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
-        block.verifyTransactions(0, flags);
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
 
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
 
@@ -500,10 +471,8 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(true, witnessRoot, Sha256Hash.ZERO_HASH.getBytes());
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
-        block.verifyTransactions(0, flags);
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
 
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
         btcToRskClientFileData.getTransactionProofs().put(segwitTx.getWTxId(), new ArrayList<>());
@@ -513,9 +482,11 @@ class BtcToRskClientTest {
 
         ActivationConfig mockedActivationConfig = mock(ActivationConfig.class);
         when(mockedActivationConfig.isActive(eq(ConsensusRule.RSKIP143), anyLong())).thenReturn(true);
+        when(mockedActivationConfig.isActive(eq(ConsensusRule.RSKIP460), anyLong())).thenReturn(true);
 
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
+        when(federatorSupport.getConfigForBestBlock()).thenReturn(activationsForBlock);
 
         BtcToRskClient client = spy(buildWithFactoryAndSetup(
             federatorSupport,
@@ -525,7 +496,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         ));
 
         client.onBlock(block);
@@ -544,10 +516,8 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(true, witnessRoot, Sha256Hash.ZERO_HASH.getBytes());
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), tx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, tx));
-        block.verifyTransactions(0, flags);
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
 
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
         btcToRskClientFileData.getTransactionProofs().put(tx.getWTxId(), new ArrayList<>());
@@ -571,10 +541,8 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(true, witnessRoot, new byte[]{1,2,3});
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
-        block.verifyTransactions(0, flags);
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
 
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
         btcToRskClientFileData.getTransactionProofs().put(segwitTx.getWTxId(), new ArrayList<>());
@@ -598,10 +566,8 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(false, witnessRoot, Sha256Hash.ZERO_HASH.getBytes());
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
-        block.verifyTransactions(0, flags);
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
 
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
         btcToRskClientFileData.getTransactionProofs().put(segwitTx.getWTxId(), new ArrayList<>());
@@ -625,8 +591,31 @@ class BtcToRskClientTest {
         Transaction coinbaseTx = getCoinbaseTx(true, witnessRoot, Sha256Hash.ZERO_HASH.getBytes(), Sha256Hash.of(new byte[]{6,6,6}).getBytes());
 
         Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
-        EnumSet<Block.VerifyFlag> flags = mock(EnumSet.class);
-        when(flags.contains(any())).thenReturn(false);
+        Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
+        block.verifyTransactions(0, EnumSet.noneOf(Block.VerifyFlag.class));
+
+        BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
+        btcToRskClientFileData.getTransactionProofs().put(segwitTx.getWTxId(), new ArrayList<>());
+
+        BtcToRskClientFileStorage btcToRskClientFileStorageMock = mock(BtcToRskClientFileStorage.class);
+        when(btcToRskClientFileStorageMock.read(any())).thenReturn(new BtcToRskClientFileReadResult(true, btcToRskClientFileData));
+
+        BtcToRskClient client = createClientWithMocksCustomStorageFiles(null, null, btcToRskClientFileStorageMock);
+
+        client.onBlock(block);
+
+        verify(btcToRskClientFileStorageMock, never()).write(any());
+        assertFalse(btcToRskClientFileData.getTransactionProofs().get(segwitTx.getWTxId()).stream().anyMatch(b -> b.getBlockHash().equals(block.getHash())));
+        assertFalse(btcToRskClientFileData.getCoinbaseInformationMap().containsKey(block.getHash()));
+    }
+
+    @Test
+    void onBlock_including_segwit_tx_coinbase_witness_commitment_malformed() throws Exception {
+        Transaction segwitTx = getTx(true);
+        Transaction coinbaseTx = getCoinbaseTransactionWithWrongWitnessCommitment();
+
+        Sha256Hash merkleRoot = Sha256Hash.wrapReversed(Sha256Hash.hashTwice(coinbaseTx.getTxId().getReversedBytes(), segwitTx.getTxId().getReversedBytes()));
+        EnumSet<Block.VerifyFlag> flags = EnumSet.noneOf(Block.VerifyFlag.class);
         Block block = new Block(networkParameters, 2L, Sha256Hash.ZERO_HASH, merkleRoot, 0L,0L,0L, Arrays.asList(coinbaseTx, segwitTx));
         block.verifyTransactions(0, flags);
 
@@ -675,6 +664,7 @@ class BtcToRskClientTest {
     void when_markCoinbasesAsReadyToBeInformed_informedBlocks_notEmpty_writeToStorage() throws Exception {
         BtcToRskClientFileData btcToRskClientFileData = new BtcToRskClientFileData();
         CoinbaseInformation coinbaseInformation = mock(CoinbaseInformation.class);
+        when(coinbaseInformation.getCoinbaseTransaction()).thenReturn(mock(Transaction.class));
         btcToRskClientFileData.getCoinbaseInformationMap().put(Sha256Hash.ZERO_HASH, coinbaseInformation);
 
         BtcToRskClientFileStorage btcToRskClientFileStorageMock = mock(BtcToRskClientFileStorage.class);
@@ -811,6 +801,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2PKH);
         int amountOfHeadersToSend = 345;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client = btcToRskClientBuilder
             .withActivationConfig(activationConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -818,7 +811,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         client.updateBridgeBtcBlockchain();
@@ -939,6 +932,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2PKH);
         int amountOfHeadersToSend = 345;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client = btcToRskClientBuilder
             .withActivationConfig(activationConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -946,7 +942,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         client.updateBridgeBtcBlockchain();
@@ -982,6 +978,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2PKH);
         int amountOfHeadersToSend = 215;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client =  btcToRskClientBuilder
             .withActivationConfig(activationConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -989,7 +988,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         // Let's see what happens...
@@ -1673,6 +1672,9 @@ class BtcToRskClientTest {
         int amountOfHeadersToSend = 100;
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2SHMULTISIG);
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client = btcToRskClientBuilder
             .withActivationConfig(activationsConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -1680,7 +1682,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         client.onTransaction(tx);
@@ -1756,7 +1758,7 @@ class BtcToRskClientTest {
 
         SimpleFederatorSupport federatorSupport = new SimpleFederatorSupport();
         // set a fake member to federatorSupport to recreate a not-null runner
-        federatorSupport.setMember(fakeMember);
+        federatorSupport.setMember(activeFederationMember);
 
         BtcToRskClient client = buildWithFactoryAndSetup(
             federatorSupport,
@@ -1766,7 +1768,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             getMockedBtcToRskClientFileStorage(),
             new BtcLockSenderProvider(),
-            new PeginInstructionsProvider()
+            new PeginInstructionsProvider(),
+            null
         );
 
         // Assign Federation to BtcToRskClient
@@ -1816,6 +1819,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.P2SHP2WPKH);
         int amountOfHeadersToSend = 100;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client = btcToRskClientBuilder
             .withActivationConfig(activationsConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -1823,7 +1829,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         client.onTransaction(tx);
@@ -1867,6 +1873,9 @@ class BtcToRskClientTest {
         BtcLockSenderProvider btcLockSenderProvider = mockBtcLockSenderProvider(TxSenderAddressType.UNKNOWN);
         int amountOfHeadersToSend = 100;
 
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(amountOfHeadersToSend);
+
         BtcToRskClient client = btcToRskClientBuilder
             .withActivationConfig(activationsConfig)
             .withBitcoinWrapper(bitcoinWrapper)
@@ -1874,7 +1883,7 @@ class BtcToRskClientTest {
             .withBridgeConstants(bridgeRegTestConstants)
             .withBtcLockSenderProvider(btcLockSenderProvider)
             .withFederation(activeFederation)
-            .withAmountOfHeadersToSend(amountOfHeadersToSend)
+            .withFedNodeSystemProperties(config)
             .build();
 
         client.onTransaction(tx);
@@ -2239,7 +2248,7 @@ class BtcToRskClientTest {
         when(btcToRskClientFileStorageMock.read(any())).thenReturn(new BtcToRskClientFileReadResult(true, btcToRskClientFileData));
 
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BtcToRskClient client = buildWithFactoryAndSetup(
             federatorSupport,
@@ -2249,7 +2258,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         );
 
         client.updateBridgeBtcCoinbaseTransactions();
@@ -2278,7 +2288,7 @@ class BtcToRskClientTest {
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
         // mocking that the coinbase was already informed
         when(federatorSupport.hasBlockCoinbaseInformed(any())).thenReturn(true);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BtcToRskClient client = buildWithFactoryAndSetup(
             federatorSupport,
@@ -2288,7 +2298,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         );
 
         client.updateBridgeBtcCoinbaseTransactions();
@@ -2321,7 +2332,7 @@ class BtcToRskClientTest {
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
         // Mocking the Bridge to indicate the coinbase was not informed, and then it was
         when(federatorSupport.hasBlockCoinbaseInformed(any())).thenReturn(false, true);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BtcToRskClient client = buildWithFactoryAndSetup(
             federatorSupport,
@@ -2331,7 +2342,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         );
 
         // The first time the coinbase is not there yet, the second time it is
@@ -2367,7 +2379,7 @@ class BtcToRskClientTest {
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
         // mocking that the coinbase was not informed
         when(federatorSupport.hasBlockCoinbaseInformed(any())).thenReturn(false);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BtcToRskClient client = buildWithFactoryAndSetup(
             federatorSupport,
@@ -2377,7 +2389,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         );
 
         // Calling updateBridgeBtcCoinbaseTransactions twice but failing to register it keeps the storage in place
@@ -2408,7 +2421,7 @@ class BtcToRskClientTest {
 
         FederatorSupport federatorSupport = mock(FederatorSupport.class);
         when(federatorSupport.getBtcBestBlockChainHeight()).thenReturn(1);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BitcoinWrapper bitcoinWrapper = mock(BitcoinWrapper.class);
         when(bitcoinWrapper.getBestChainHeight()).thenReturn(1);
@@ -2421,7 +2434,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             getMockedBtcToRskClientFileStorage(),
             mock(BtcLockSenderProvider.class),
-            mock(PeginInstructionsProvider.class)
+            mock(PeginInstructionsProvider.class),
+            null
         ));
 
         btcToRskClient.updateBridge();
@@ -2430,6 +2444,76 @@ class BtcToRskClientTest {
         verify(btcToRskClient, times(1)).updateBridgeBtcCoinbaseTransactions();
         verify(btcToRskClient, times(1)).updateBridgeBtcTransactions();
         verify(federatorSupport, times(1)).sendUpdateCollections();
+    }
+
+    @Test
+    void updateBridge_whenUpdateBridgeConfigAreFalse_shouldNotCallAny() throws Exception {
+        NodeBlockProcessor nodeBlockProcessor = mock(NodeBlockProcessor.class);
+        when(nodeBlockProcessor.hasBetterBlockToSync()).thenReturn(false);
+
+        FederatorSupport federatorSupport = mock(FederatorSupport.class);
+        when(federatorSupport.getBtcBestBlockChainHeight()).thenReturn(1);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
+
+        BitcoinWrapper bitcoinWrapper = mock(BitcoinWrapper.class);
+        when(bitcoinWrapper.getBestChainHeight()).thenReturn(1);
+
+        PowpegNodeSystemProperties config = getMockedFedNodeSystemProperties(false);
+
+        BtcToRskClient btcToRskClient = spy(buildWithFactoryAndSetup(
+            federatorSupport,
+            nodeBlockProcessor,
+            activationConfig,
+            bitcoinWrapper,
+            bridgeRegTestConstants,
+            getMockedBtcToRskClientFileStorage(),
+            mock(BtcLockSenderProvider.class),
+            mock(PeginInstructionsProvider.class),
+            config
+        ));
+
+        btcToRskClient.updateBridge();
+
+        verify(btcToRskClient, never()).updateBridgeBtcBlockchain();
+        verify(btcToRskClient, never()).updateBridgeBtcCoinbaseTransactions();
+        verify(btcToRskClient, never()).updateBridgeBtcTransactions();
+        verify(federatorSupport, never()).sendUpdateCollections();
+    }
+
+    @Test
+    void updateBridge_noUpdateBridgeConfigDefined_shouldTriggerBridgeUpdates() throws Exception {
+        NodeBlockProcessor nodeBlockProcessor = mock(NodeBlockProcessor.class);
+        when(nodeBlockProcessor.hasBetterBlockToSync()).thenReturn(false);
+
+        FederatorSupport federatorSupport = mock(FederatorSupport.class);
+        when(federatorSupport.getBtcBestBlockChainHeight()).thenReturn(1);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
+
+        BitcoinWrapper bitcoinWrapper = mock(BitcoinWrapper.class);
+        when(bitcoinWrapper.getBestChainHeight()).thenReturn(1);
+
+        CliArgs<NodeCliOptions, NodeCliFlags> cliArgs = CliArgs.empty();
+        ConfigLoader configLoader = new ConfigLoader(cliArgs);
+        PowpegNodeSystemProperties config = new PowpegNodeSystemProperties(configLoader);
+
+        BtcToRskClient btcToRskClient = spy(buildWithFactoryAndSetup(
+            federatorSupport,
+            nodeBlockProcessor,
+            activationConfig,
+            bitcoinWrapper,
+            bridgeRegTestConstants,
+            getMockedBtcToRskClientFileStorage(),
+            mock(BtcLockSenderProvider.class),
+            mock(PeginInstructionsProvider.class),
+            config
+        ));
+
+        btcToRskClient.updateBridge();
+
+        verify(btcToRskClient).updateBridgeBtcBlockchain();
+        verify(btcToRskClient).updateBridgeBtcCoinbaseTransactions();
+        verify(btcToRskClient).updateBridgeBtcTransactions();
+        verify(federatorSupport).sendUpdateCollections();
     }
 
     @Test
@@ -2447,7 +2531,7 @@ class BtcToRskClientTest {
         when(federatorSupport.getBtcBestBlockChainHeight()).thenReturn(1);
         when(federatorSupport.isBtcTxHashAlreadyProcessed(peginTx.getTxId())).thenReturn(true);
         when(federatorSupport.getBtcTxHashProcessedHeight(peginTx.getTxId())).thenReturn(1L);
-        when(federatorSupport.getFederationMember()).thenReturn(fakeMember);
+        when(federatorSupport.getFederationMember()).thenReturn(activeFederationMember);
 
         BitcoinWrapper bitcoinWrapper = mock(BitcoinWrapper.class);
         when(bitcoinWrapper.getBestChainHeight()).thenReturn(1);
@@ -2480,7 +2564,8 @@ class BtcToRskClientTest {
             bridgeRegTestConstants,
             btcToRskClientFileStorageMock,
             btcLockSenderProvider,
-            peginInstructionsProvider
+            peginInstructionsProvider,
+            null
         ));
 
         btcToRskClient.updateBridge();
@@ -2513,19 +2598,25 @@ class BtcToRskClientTest {
         BridgeConstants bridgeConstants,
         BtcToRskClientFileStorage btcToRskClientFileStorage,
         BtcLockSenderProvider btcLockSenderProvider,
-        PeginInstructionsProvider peginInstructionsProvider) throws Exception {
+        PeginInstructionsProvider peginInstructionsProvider,
+        PowpegNodeSystemProperties fedNodeSystemProperties
+        ) throws Exception {
 
         BtcToRskClient btcToRskClient = buildWithFactory(federatorSupport, nodeBlockProcessor);
 
+        PowpegNodeSystemProperties config = nonNull(fedNodeSystemProperties) ? fedNodeSystemProperties : getMockedFedNodeSystemProperties(true);
+
+        if (MockUtil.isMock(config)) {
+            when(config.getActivationConfig()).thenReturn(activationConfig);
+        }
+
         btcToRskClient.setup(
-            activationConfig,
             bitcoinWrapper,
             bridgeConstants,
             btcToRskClientFileStorage,
             btcLockSenderProvider,
             peginInstructionsProvider,
-            false,
-            100
+            config
         );
         btcToRskClient.start(activeFederation);
 
@@ -2677,6 +2768,39 @@ class BtcToRskClientTest {
         return tx;
     }
 
+    private Transaction getCoinbaseTransactionWithWrongWitnessCommitment() {
+        Address rewardAddress = Address.fromString(networkParameters, "mvbnrCX3bg1cDRUu8pkecrvP6vQkSLDSou");
+        Script inputScript = new Script(new byte[]{ 1, 0 }); // Free-form, as long as it's has at least 2 bytes
+
+        Transaction coinbaseTx = new Transaction(networkParameters);
+        coinbaseTx.addInput(
+            Sha256Hash.ZERO_HASH,
+            -1L,
+            inputScript
+        );
+        coinbaseTx.addOutput(Coin.COIN, rewardAddress);
+        coinbaseTx.verify();
+
+        TransactionWitness txWitness = new TransactionWitness(1);
+        txWitness.setPush(0, WITNESS_RESERVED_VALUE.getBytes());
+        coinbaseTx.getInput(0).setWitness(txWitness);
+
+        Sha256Hash witnessCommitment = Sha256Hash.wrap("0011223344556677889900112233445566778899001122334455667788990011");
+        String witnessCommitmentHeader = "aa21a9ed";
+        byte[] wrongWitnessCommitmentWithHeader = ByteUtil.merge(
+            new byte[]{ScriptOpCodes.OP_RETURN},
+            new byte[]{ScriptOpCodes.OP_PUSHDATA1},
+            new byte[]{WITNESS_COMMITMENT_LENGTH},
+            Hex.decode(witnessCommitmentHeader),
+            witnessCommitment.getBytes()
+        );
+        Script wrongWitnessCommitmentScript = new Script(wrongWitnessCommitmentWithHeader);
+        coinbaseTx.addOutput(Coin.ZERO, wrongWitnessCommitmentScript);
+        coinbaseTx.verify();
+
+        return coinbaseTx;
+    }
+
     private Transaction getTx(boolean hasWitness) {
         Transaction tx = new Transaction(networkParameters);
         TransactionInput input = new TransactionInput(networkParameters, null, new byte[]{}, new TransactionOutPoint(networkParameters, 0L, Sha256Hash.ZERO_HASH));
@@ -2704,4 +2828,18 @@ class BtcToRskClientTest {
 
         return btcLockSenderProvider;
     }
+
+    private PowpegNodeSystemProperties getMockedFedNodeSystemProperties(boolean defaultBooleanConfigValue) {
+
+        PowpegNodeSystemProperties config = mock(PowpegNodeSystemProperties.class);
+        when(config.getAmountOfHeadersToSend()).thenReturn(100);
+        when(config.isUpdateBridgeTimerEnabled()).thenReturn(defaultBooleanConfigValue);
+        when(config.shouldUpdateBridgeBtcBlockchain()).thenReturn(defaultBooleanConfigValue);
+        when(config.shouldUpdateBridgeBtcCoinbaseTransactions()).thenReturn(defaultBooleanConfigValue);
+        when(config.shouldUpdateBridgeBtcTransactions()).thenReturn(defaultBooleanConfigValue);
+        when(config.shouldUpdateCollections()).thenReturn(defaultBooleanConfigValue);
+
+        return config;
+    }
+
 }

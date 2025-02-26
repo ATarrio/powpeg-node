@@ -12,6 +12,8 @@ import static co.rsk.federate.signing.HSMField.R;
 import static co.rsk.federate.signing.HSMField.S;
 import static co.rsk.federate.signing.HSMField.SIGNATURE;
 import static co.rsk.federate.signing.HSMField.VERSION;
+import static co.rsk.federate.signing.hsm.config.PowHSMConfigParameter.MAX_ATTEMPTS;
+import static co.rsk.federate.signing.hsm.config.PowHSMConfigParameter.INTERVAL_BETWEEN_ATTEMPTS;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -23,8 +25,8 @@ import static org.mockito.Mockito.when;
 import co.rsk.federate.rpc.JsonRpcClient;
 import co.rsk.federate.rpc.JsonRpcClientProvider;
 import co.rsk.federate.rpc.JsonRpcException;
-import co.rsk.federate.signing.ECDSASignerFactory;
 import co.rsk.federate.signing.hsm.HSMClientException;
+import co.rsk.federate.signing.hsm.HSMVersion;
 import co.rsk.federate.signing.hsm.message.SignerMessageV1;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -35,14 +37,17 @@ import org.junit.jupiter.api.Test;
 class PowHSMSigningClientRskMstTest {
     private JsonRpcClient jsonRpcClientMock;
     private PowHSMSigningClient client;
-    private final static int HSM_VERSION = 2;
 
     @BeforeEach
     void createClient() throws JsonRpcException {
         JsonRpcClientProvider jsonRpcClientProviderMock = mock(JsonRpcClientProvider.class);
         jsonRpcClientMock = mock(JsonRpcClient.class);
-        HSMClientProtocol hsmClientProtocol = new HSMClientProtocol(jsonRpcClientProviderMock, ECDSASignerFactory.DEFAULT_ATTEMPTS, ECDSASignerFactory.DEFAULT_INTERVAL);
-        client = new PowHSMSigningClientRskMst(hsmClientProtocol, HSM_VERSION);
+        HSMClientProtocol hsmClientProtocol = new HSMClientProtocol(
+            jsonRpcClientProviderMock,
+            MAX_ATTEMPTS.getDefaultValue(Integer::parseInt),
+            INTERVAL_BETWEEN_ATTEMPTS.getDefaultValue(Integer::parseInt)
+        );
+        client = new PowHSMSigningClientRskMst(hsmClientProtocol, HSMVersion.V2.getNumber());
         when(jsonRpcClientProviderMock.acquire()).thenReturn(jsonRpcClientMock);
     }
 
@@ -56,7 +61,7 @@ class PowHSMSigningClientRskMstTest {
         SignerMessageV1 messageForSignature = new SignerMessageV1(Hex.decode("bbccddee"));
 
         ObjectNode expectedSignRequest = buildSignRequest();
-        ObjectNode response = buildSignResponse("223344", "55667788", 0);
+        ObjectNode response = buildSignResponse();
 
         when(jsonRpcClientMock.send(expectedSignRequest)).thenReturn(response);
 
@@ -171,7 +176,7 @@ class PowHSMSigningClientRskMstTest {
     private ObjectNode buildGetPublicKeyRequest() {
         ObjectNode request = new ObjectMapper().createObjectNode();
         request.put(COMMAND.getFieldName(), GET_PUB_KEY.getCommand());
-        request.put(VERSION.getFieldName(), HSM_VERSION);
+        request.put(VERSION.getFieldName(), HSMVersion.V2.getNumber());
         request.put(KEY_ID.getFieldName(), "a-key-id");
 
         return request;
@@ -180,7 +185,7 @@ class PowHSMSigningClientRskMstTest {
     private ObjectNode buildSignRequest() {
         ObjectNode request = new ObjectMapper().createObjectNode();
         request.put(COMMAND.getFieldName(), SIGN.getCommand());
-        request.put(VERSION.getFieldName(), HSM_VERSION);
+        request.put(VERSION.getFieldName(), HSMVersion.V2.getNumber());
         request.put(KEY_ID.getFieldName(), "a-key-id");
 
         ObjectNode message = new ObjectMapper().createObjectNode();
@@ -190,7 +195,10 @@ class PowHSMSigningClientRskMstTest {
         return request;
     }
 
-    private ObjectNode buildSignResponse(String r, String s, int errorCode) {
+    private ObjectNode buildSignResponse() {
+        String r = "223344";
+        String s = "55667788";
+        int errorCode = 0;
         ObjectNode response = new ObjectMapper().createObjectNode();
         ObjectNode signature = new ObjectMapper().createObjectNode();
         signature.put(R.getFieldName(), r);
